@@ -14,6 +14,10 @@ def compose_yaml_path(suffix: str = "") -> str:
     return os.path.join(os.path.join(test_path(), "include"), f"docker-compose{suffix}.yaml")
 
 
+def include_fixture_path(name: str) -> str:
+    return os.path.join(test_path(), "include", name, "docker-compose.yaml")
+
+
 class TestPodmanComposeInclude(unittest.TestCase, RunSubprocessMixin):
     @parameterized.expand([
         ("string", ""),
@@ -51,3 +55,24 @@ class TestPodmanComposeInclude(unittest.TestCase, RunSubprocessMixin):
                 "-t",
                 "0",
             ])
+
+
+class TestPodmanComposeIncludeObjectForm(unittest.TestCase, RunSubprocessMixin):
+    """End-to-end check of the `include` object form via `config`. The individual
+    resolution rules are covered by tests/unit/test_include.py."""
+
+    def _config(self, compose_file: str) -> str:
+        out, _ = self.run_subprocess_assert_returncode([
+            podman_compose_path(),
+            "-f",
+            compose_file,
+            "config",
+        ])
+        return out.decode("utf-8")
+
+    def test_env_file(self) -> None:
+        """Variables from an include's env_file feed the included file's
+        interpolation but do not leak into the parent compose file."""
+        out = self._config(include_fixture_path("env_file"))
+        self.assertIn("image: localhost/child-from-env-file", out)
+        self.assertIn("image: localhost/parent-fallback", out)
