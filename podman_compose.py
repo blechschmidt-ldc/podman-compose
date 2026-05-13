@@ -2504,21 +2504,25 @@ class PodmanCompose:
     @staticmethod
     def _resolve_include_entries(
         include: list[Any], base_dir: str
-    ) -> list[tuple[str, dict[str, str | None] | None]]:
+    ) -> list[tuple[str, dict[str, str | None] | None, str]]:
         """
-        Turn a compose `include` list into (filename, env_override) pairs.
+        Turn a compose `include` list into (filename, env_override, project_dir)
+        triples.
 
         Each item may be a string (short form) or a mapping with `path` (string
-        or list of strings) and optional `env_file` (string or list of strings).
-        Paths and env_file paths are resolved relative to ``base_dir``; variable
+        or list of strings), optional `env_file` (string or list of strings),
+        and optional `project_directory` (string). The `path` and explicit
+        `env_file` paths are resolved relative to ``base_dir`` — the directory
+        of the compose file in which this include directive appears. Variable
         interpolation inside them is expected to have happened already.
 
-        Per the compose-spec, when `env_file` is not set it defaults to `.env`
-        in the included file's project_directory (the directory of the included
-        file unless explicitly overridden). The default `.env` is loaded silently
-        if present and ignored otherwise.
+        ``project_directory`` is itself resolved relative to ``base_dir`` and
+        defaults to the directory of the included file. It becomes the base
+        directory for resolving relative paths *inside* the included file
+        (nested includes, ``extends.file`` references, and the default `.env`
+        lookup).
         """
-        entries: list[tuple[str, dict[str, str | None] | None]] = []
+        entries: list[tuple[str, dict[str, str | None] | None, str]] = []
         for inc in include:
             if isinstance(inc, str):
                 inc = {"path": inc}
@@ -2551,8 +2555,16 @@ class PodmanCompose:
                 env_files = []
                 env_file_explicit = False
 
+            project_directory_val = inc.get("project_directory")
+            if project_directory_val is not None and not isinstance(project_directory_val, str):
+                raise RuntimeError("include.project_directory must be a string")
+
             for p in paths:
                 resolved_path = os.path.join(base_dir, p)
+                if project_directory_val is None:
+                    project_dir = os.path.dirname(resolved_path)
+                else:
+                    project_dir = os.path.join(base_dir, project_directory_val)
                 env_override: dict[str, str | None] | None
                 if env_file_explicit:
                     env_override = {}
@@ -2562,13 +2574,12 @@ class PodmanCompose:
                             raise RuntimeError(f"include.env_file {ef!r} not found at {ef_path}")
                         env_override.update(dotenv_to_dict(ef_path))
                 else:
-                    # Default: .env next to the included file (project_directory).
-                    default_dotenv = os.path.join(os.path.dirname(resolved_path), ".env")
+                    default_dotenv = os.path.join(project_dir, ".env")
                     if os.path.isfile(default_dotenv):
                         env_override = dict(dotenv_to_dict(default_dotenv))
                     else:
                         env_override = None
-                entries.append((resolved_path, env_override))
+                entries.append((resolved_path, env_override, project_dir))
         return entries
 
     def _parse_compose_file(self) -> None:
@@ -2646,17 +2657,23 @@ class PodmanCompose:
         requested_profiles = set(args.profile).union(profiles_from_env)
 
         compose: dict[str, Any] = {}
-        # Each entry is (filename, env_override): env_override is a dict of
-        # variables loaded from an include's env_file (or None when inheriting
-        # the parent environment). env_file values are applied as defaults
-        # with self.environ (shell + parent .env) taking precedence, matching
-        # the compose-spec include semantics.
-        entries: list[tuple[str, dict[str, str | None] | None]] = [(f, None) for f in files]
+        # Each entry is (filename, env_override, project_dir):
+        # - env_override: variables loaded from an include's env_file (or
+        #   None when inheriting the parent environment). Applied as defaults
+        #   with self.environ (shell + parent .env) taking precedence.
+        # - project_dir: base directory for resolving relative paths *inside*
+        #   the file (nested include paths, extends.file). For top-level
+        #   files it is the file's own directory; for included files it is
+        #   the include entry's project_directory (defaulting to the directory
+        #   of the included file).
+        entries: list[tuple[str, dict[str, str | None] | None, str]] = [
+            (f, None, os.path.dirname(f)) for f in files
+        ]
         entries_iter = iter(entries)
 
         while True:
             try:
-                filename, env_override = next(entries_iter)
+                filename, env_override, project_dir = next(entries_iter)
             except StopIteration:
                 break
 
@@ -2703,15 +2720,13 @@ class PodmanCompose:
                         if 'extends' in service and (
                             service_file := service['extends'].get('file')
                         ):
-                            service['extends']['file'] = os.path.join(
-                                os.path.dirname(filename), service_file
-                            )
+                            service['extends']['file'] = os.path.join(project_dir, service_file)
 
             rec_merge(compose, content)
             # If `include` is used, append included files to files
             include = compose.get("include")
             if include:
-                entries.extend(self._resolve_include_entries(include, os.path.dirname(filename)))
+                entries.extend(self._resolve_include_entries(include, project_dir))
                 # As compose obj is updated and tested with every loop, not deleting `include`
                 # from it, results in it being tested again and again, original values for
                 # `include` be appended to `files`, and, included files be processed for ever.
