@@ -76,3 +76,12 @@ class TestPodmanComposeIncludeObjectForm(unittest.TestCase, RunSubprocessMixin):
         out = self._config(include_fixture_path("env_file"))
         self.assertIn("image: localhost/child-from-env-file", out)
         self.assertIn("image: localhost/parent-fallback", out)
+
+    def test_project_directory(self) -> None:
+        """`project_directory` relocates the default `.env` lookup and is the base
+        for relative paths inside the included file, including the path and
+        `project_directory` of a nested include."""
+        out = self._config(include_fixture_path("project_directory"))
+        self.assertIn("image: localhost/mid-from-toplevel-projdir", out)
+        self.assertIn("image: localhost/from-mid-alt", out)
+        self.assertNotIn("wrong-from", out)
